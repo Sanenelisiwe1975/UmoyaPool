@@ -1,0 +1,18 @@
+# Daml project for UmoyaPool on Canton.
+# sdk-version must match an installed Daml SDK; 2.9.x targets current Canton Devnet.
+sdk-version: 2.9.5
+name: umoyapool
+version: 0.1.0
+source: daml
+init-script: UmoyaPool.Setup:initialize
+parties:
+  - Operator
+  - Alice
+  - Bob
+  - Agent
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+build-options:
+  - --target=2.1

@@ -1,0 +1,5 @@
+.daml/
+*.dar
+.vscode/
+*.log
+devnet-token.jwt

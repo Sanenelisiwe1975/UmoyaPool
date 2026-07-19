@@ -1,0 +1,85 @@
+-- | Initialization script: allocates parties and seeds a vault + stokvel with
+-- a realistic lifecycle. Runs on `daml start` locally, and is the same script
+-- you run against a Canton Devnet participant to put contracts on-ledger.
+module UmoyaPool.Setup where
+
+import Daml.Script
+import UmoyaPool.Types
+import UmoyaPool.Vault
+import UmoyaPool.Stokvel
+
+initialize : Script ()
+initialize = do
+  operator <- allocateParty "Operator"
+  alice <- allocateParty "Alice"
+  bob <- allocateParty "Bob"
+  agent <- allocateParty "Agent"
+
+  let guardrails = Guardrails with
+        maxDrawdownBps = 1000
+        maxPositionSizeBps = 2500
+        whitelistedProtocols = ["blend", "soroswap"]
+        emergencyStop = False
+
+  -- 1. Operator opens the vault.
+  _ <- submit operator $ createCmd Vault with
+    operator
+    vaultId = "core-cc"
+    asset = "CC"
+    totalShares = 0
+    totalAssets = 0
+    deployedAssets = 0
+    guardrails
+    members = []
+
+  -- 2. Alice and Bob deposit. Each ends up with a MemberPosition private to
+  --    themselves and the operator — neither can see the other's balance.
+  aliceDep <- submit alice $ createCmd DepositRequest with
+    operator, member = alice, vaultId = "core-cc", amount = 1000
+  _ <- submit operator $ exerciseCmd aliceDep Accept_Deposit
+
+  bobDep <- submit bob $ createCmd DepositRequest with
+    operator, member = bob, vaultId = "core-cc", amount = 500
+  _ <- submit operator $ exerciseCmd bobDep Accept_Deposit
+
+  -- 3. Operator authorizes an agent, who deploys capital within guardrails.
+  _ <- submit operator $ exerciseByKeyCmd @Vault (operator, "core-cc")
+        AuthorizeAgent with agent, level = 2
+
+  deploy <- submit agent $ createCmd DeployRequest with
+    operator, agent, vaultId = "core-cc", positionId = "pos-1"
+    protocol = "blend", amount = 600, strategy = Lending
+  _ <- submit operator $ exerciseCmd deploy Accept_Deploy
+
+  -- 4. Agent closes the position at a profit; the pool's share price rises.
+  close <- submit agent $ createCmd CloseRequest with
+    operator, agent, vaultId = "core-cc", positionId = "pos-1", returnAmount = 660
+  _ <- submit operator $ exerciseCmd close Accept_Close
+
+  -- 5. A stokvel: two members, M-of-N payout approval.
+  _ <- submit operator $ createCmd Stokvel with
+    operator, stokvelId = "ubuntu-savers", name = "Ubuntu Savers"
+    members = [alice, bob], approvalThreshold = 2, balance = 0
+
+  aliceContrib <- submit alice $ createCmd ContributionRequest with
+    operator, stokvelId = "ubuntu-savers", member = alice, amount = 300
+  _ <- submit operator $ exerciseCmd aliceContrib Accept_Contribution
+
+  bobContrib <- submit bob $ createCmd ContributionRequest with
+    operator, stokvelId = "ubuntu-savers", member = bob, amount = 300
+  _ <- submit operator $ exerciseCmd bobContrib Accept_Contribution
+
+  -- Alice proposes a payout to Bob; both approve; operator executes.
+  proposal <- submit alice $ createCmd PayoutProposal with
+    operator, stokvelId = "ubuntu-savers", proposalId = "payout-1"
+    proposer = alice, recipient = bob, amount = 400, members = [alice, bob]
+
+  aliceOk <- submit alice $ createCmd Approval with
+    operator, stokvelId = "ubuntu-savers", proposalId = "payout-1", member = alice
+  bobOk <- submit bob $ createCmd Approval with
+    operator, stokvelId = "ubuntu-savers", proposalId = "payout-1", member = bob
+
+  _ <- submit operator $ exerciseByKeyCmd @Stokvel (operator, "ubuntu-savers")
+        ExecutePayout with proposalCid = proposal, approvalCids = [aliceOk, bobOk]
+
+  pure ()
