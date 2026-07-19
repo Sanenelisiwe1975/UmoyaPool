@@ -2,8 +2,13 @@
 --
 -- The privacy angle: members pool funds and vote on payouts, but each member's
 -- contribution is a `MemberStake` private to that member and the operator, and
--- each `Approval` is an independent contract. Other members see the pool and
--- the proposals, not each other's balances.
+-- each `Approval` is an independent, member-signed contract. Other members see
+-- the pool and the proposals, never each other's balances.
+--
+-- Authorization design: a proposer creates a `PayoutProposal` alone; each member
+-- creates their own `Approval` alone; the operator executes via a consuming
+-- choice that tallies approvals and archives them through their own consuming
+-- choices — so no party ever needs another's live authority.
 module UmoyaPool.Stokvel where
 
 import DA.List (dedup)
@@ -21,28 +26,6 @@ template Stokvel
     observer members
     key (operator, stokvelId) : (Party, Text)
     maintainer key._1
-
-    -- Operator executes a payout once enough members have approved it.
-    choice ExecutePayout : ContractId Stokvel
-      with
-        proposalCid : ContractId PayoutProposal
-        approvalCids : [ContractId Approval]
-      controller operator
-      do
-        proposal <- fetch proposalCid
-        assertMsg "proposal is for another stokvel" (proposal.stokvelId == stokvelId)
-        assertMsg "payout exceeds balance" (proposal.amount <= balance)
-
-        approvals <- mapA fetch approvalCids
-        let approvers = dedup [ a.member | a <- approvals ]
-        assertMsg "an approval is for another proposal"
-          (all (\a -> a.proposalId == proposal.proposalId) approvals)
-        assertMsg "all approvers must be members" (all (`elem` members) approvers)
-        assertMsg "not enough approvals" (length approvers >= approvalThreshold)
-
-        archive proposalCid
-        mapA_ archive approvalCids
-        create this with balance = balance - proposal.amount
 
 -- | A member's private contribution record (operator + member only).
 template MemberStake
@@ -86,7 +69,24 @@ template ContributionRequest
             create MemberStake with operator, stokvelId, member, contributed = amount
         pure (newS, stakeCid)
 
--- | A payout proposal, visible to the operator and all members.
+-- | An independent, member-signed approval of a specific proposal. The operator
+-- can retire it via the consuming `ConsumeApproval` choice during execution.
+template Approval
+  with
+    operator : Party
+    stokvelId : Text
+    proposalId : Text
+    member : Party
+  where
+    signatory member
+    observer operator
+
+    choice ConsumeApproval : ()
+      controller operator
+      do pure ()
+
+-- | A payout proposal. Signed by the proposer alone; operator and members
+-- observe. The operator executes it once enough members have approved.
 template PayoutProposal
   with
     operator : Party
@@ -97,18 +97,24 @@ template PayoutProposal
     amount : Int
     members : [Party]
   where
-    signatory operator, proposer
-    observer members
+    signatory proposer
+    observer operator :: members
 
--- | An independent, member-signed approval of a specific proposal.
-template Approval
-  with
-    operator : Party
-    stokvelId : Text
-    proposalId : Text
-    member : Party
-  where
-    signatory member
-    observer operator
-    key (operator, proposalId, member) : (Party, Text, Party)
-    maintainer key._1
+    choice Execute : ContractId Stokvel
+      with approvalCids : [ContractId Approval]
+      controller operator
+      do
+        (scid, s) <- fetchByKey @Stokvel (operator, stokvelId)
+        assertMsg "payout exceeds balance" (amount <= s.balance)
+
+        approvals <- mapA fetch approvalCids
+        let approvers = dedup [ a.member | a <- approvals ]
+        assertMsg "an approval is for another proposal"
+          (all (\a -> a.proposalId == proposalId) approvals)
+        assertMsg "all approvers must be members" (all (`elem` members) approvers)
+        assertMsg "not enough approvals" (length approvers >= s.approvalThreshold)
+
+        -- Retire each approval through its own consuming choice.
+        _ <- mapA (\cid -> exercise cid ConsumeApproval) approvalCids
+        archive scid
+        create s with balance = s.balance - amount

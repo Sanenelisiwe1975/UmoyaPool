@@ -38,7 +38,7 @@ template Vault
     choice SetEmergencyStop : ContractId Vault
       with stop : Bool
       controller operator
-      do create this with guardrails = guardrails with emergencyStop = stop
+      do create this with guardrails = (guardrails with emergencyStop = stop)
 
     -- Admin: update mutable guardrail parameters.
     choice SetGuardrails : ContractId Vault
@@ -47,9 +47,8 @@ template Vault
       do
         assertMsg "drawdown bps out of range" (newMaxDrawdownBps >= 0 && newMaxDrawdownBps <= bps)
         assertMsg "position bps out of range" (newMaxPositionSizeBps >= 0 && newMaxPositionSizeBps <= bps)
-        create this with guardrails = guardrails with
-          maxDrawdownBps = newMaxDrawdownBps
-          maxPositionSizeBps = newMaxPositionSizeBps
+        create this with
+          guardrails = (guardrails with maxDrawdownBps = newMaxDrawdownBps, maxPositionSizeBps = newMaxPositionSizeBps)
 
     -- Admin: authorize an agent to deploy capital from this vault.
     nonconsuming choice AuthorizeAgent : ContractId AgentRight

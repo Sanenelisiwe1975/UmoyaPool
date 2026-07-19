@@ -46,14 +46,15 @@ initialize = do
   _ <- submit operator $ exerciseByKeyCmd @Vault (operator, "core-cc")
         AuthorizeAgent with agent, level = 2
 
+  -- TVL is 1500 here; the 25% position cap allows up to 375. Deploy 300.
   deploy <- submit agent $ createCmd DeployRequest with
     operator, agent, vaultId = "core-cc", positionId = "pos-1"
-    protocol = "blend", amount = 600, strategy = Lending
+    protocol = "blend", amount = 300, strategy = Lending
   _ <- submit operator $ exerciseCmd deploy Accept_Deploy
 
   -- 4. Agent closes the position at a profit; the pool's share price rises.
   close <- submit agent $ createCmd CloseRequest with
-    operator, agent, vaultId = "core-cc", positionId = "pos-1", returnAmount = 660
+    operator, agent, vaultId = "core-cc", positionId = "pos-1", returnAmount = 345
   _ <- submit operator $ exerciseCmd close Accept_Close
 
   -- 5. A stokvel: two members, M-of-N payout approval.
@@ -79,7 +80,6 @@ initialize = do
   bobOk <- submit bob $ createCmd Approval with
     operator, stokvelId = "ubuntu-savers", proposalId = "payout-1", member = bob
 
-  _ <- submit operator $ exerciseByKeyCmd @Stokvel (operator, "ubuntu-savers")
-        ExecutePayout with proposalCid = proposal, approvalCids = [aliceOk, bobOk]
+  _ <- submit operator $ exerciseCmd proposal Execute with approvalCids = [aliceOk, bobOk]
 
   pure ()
