@@ -1,0 +1,16 @@
+node_modules/
+dist/
+build/
+.env
+.env.local
+*.log
+.DS_Store
+coverage/
+backend/data/
+target/
+**/test_snapshots/
+*.wasm
+
+# Deployment record contains a testnet admin secret — keep it local.
+# The public record (address, tx hashes) is committed as deployment.public.json.
+contracts/deploy/deployment.json

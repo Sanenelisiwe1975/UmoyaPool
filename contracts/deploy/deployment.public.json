@@ -1,0 +1,14 @@
+{
+  "network": "testnet",
+  "networkPassphrase": "Test SDF Network ; September 2015",
+  "contractAddress": "CDS4Z4MZMCZQXH43H6GJ2NSDTEZSEWS6QGL5A4KBEK2U4WMI4QHXGFC2",
+  "admin": "GBI5YWFSPPPTFEWERPK47DGGQVUJ3W4CJJNQEBW64DSOBSRS3KNUWT6N",
+  "wasmHash": "25db1d9b896f193d8067ae7518a81d51d7df82ce669f683bc6e10d4a99dc93d2",
+  "transactions": {
+    "uploadWasm": "8f4ca7222c9583d0ef17ac5715ae4b994da1e4338e13b5c8dd0f438ef7015eee",
+    "createContract": "0726368037deb13e820ad49a09297a16d11c35ce773b4763d082695ebcb9487e",
+    "initialize": "f2339975613364ef23c2341f3bdc4ea8b7af02427d1f61070946baba7caa905d"
+  },
+  "initializedAt": "2026-07-19T13:54:55.334Z",
+  "explorer": "https://stellar.expert/explorer/testnet/contract/CDS4Z4MZMCZQXH43H6GJ2NSDTEZSEWS6QGL5A4KBEK2U4WMI4QHXGFC2"
+}

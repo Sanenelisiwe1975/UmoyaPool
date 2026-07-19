@@ -1,0 +1,6 @@
+# Soroban's VM rejects post-MVP wasm features that newer Rust/LLVM enable by
+# default. Disable them for the wasm target so the produced module validates.
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-C", "target-feature=-reference-types,-multivalue,-sign-ext,-bulk-memory",
+]
