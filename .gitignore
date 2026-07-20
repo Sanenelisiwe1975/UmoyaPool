@@ -10,6 +10,10 @@ backend/data/
 target/
 **/test_snapshots/
 *.wasm
+.daml/
+*.dar
+.vscode/
+devnet-token.jwt
 
 # Deployment record contains a testnet admin secret — keep it local.
 # The public record (address, tx hashes) is committed as deployment.public.json.

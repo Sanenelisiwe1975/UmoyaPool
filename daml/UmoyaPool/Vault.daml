@@ -1,0 +1,252 @@
+-- | UmoyaPool vault on Canton.
+--
+-- Privacy model (the reason this belongs on Canton):
+--   * `Vault` is the shared pool. The operator is its signatory; members are
+--     observers, so they can see pool-level totals (TVL, APY) — but nothing
+--     about *each other*.
+--   * `MemberPosition` holds one member's shares. It is signed by the operator
+--     and that member only, so a member's balance and cost basis are visible
+--     to that member and the operator — never to other members. On a public
+--     ledger every balance leaks; here confidentiality is enforced by the
+--     ledger model itself.
+--   * Agent capital deployment is gated by operator-issued `AgentRight`s and
+--     the same on-chain guardrails as the Soroban design.
+module UmoyaPool.Vault where
+
+import DA.List (dedup)
+import UmoyaPool.Types
+
+-- | The shared yield pool. `vaultId` is a stable identifier that survives the
+-- archive-and-recreate we use to "update" the contract.
+template Vault
+  with
+    operator : Party
+    vaultId : Text
+    asset : Text
+    totalShares : Int
+    totalAssets : Int
+    deployedAssets : Int
+    guardrails : Guardrails
+    members : [Party]
+  where
+    signatory operator
+    observer members
+    key (operator, vaultId) : (Party, Text)
+    maintainer key._1
+
+    -- Admin: toggle the emergency stop (halts deposits and deployments).
+    choice SetEmergencyStop : ContractId Vault
+      with stop : Bool
+      controller operator
+      do create this with guardrails = (guardrails with emergencyStop = stop)
+
+    -- Admin: update mutable guardrail parameters.
+    choice SetGuardrails : ContractId Vault
+      with newMaxDrawdownBps : Int, newMaxPositionSizeBps : Int
+      controller operator
+      do
+        assertMsg "drawdown bps out of range" (newMaxDrawdownBps >= 0 && newMaxDrawdownBps <= bps)
+        assertMsg "position bps out of range" (newMaxPositionSizeBps >= 0 && newMaxPositionSizeBps <= bps)
+        create this with
+          guardrails = (guardrails with maxDrawdownBps = newMaxDrawdownBps, maxPositionSizeBps = newMaxPositionSizeBps)
+
+    -- Admin: authorize an agent to deploy capital from this vault.
+    nonconsuming choice AuthorizeAgent : ContractId AgentRight
+      with agent : Party, level : Int
+      controller operator
+      do
+        assertMsg "level must be 1..3" (level >= 1 && level <= 3)
+        create AgentRight with operator, vaultId, agent, level
+
+-- | A member's private stake in a vault. Visible only to the member and the
+-- operator. Keyed so deposits/withdrawals merge into a single position.
+template MemberPosition
+  with
+    operator : Party
+    vaultId : Text
+    member : Party
+    shares : Int
+    costBasis : Int
+  where
+    signatory operator, member
+    key (operator, vaultId, member) : (Party, Text, Party)
+    maintainer key._1
+
+-- | Operator-issued authorization for an agent (KYA level 1..3). Visible to
+-- the operator and the agent only.
+template AgentRight
+  with
+    operator : Party
+    vaultId : Text
+    agent : Party
+    level : Int
+  where
+    signatory operator
+    observer agent
+    key (operator, vaultId, agent) : (Party, Text, Party)
+    maintainer key._1
+
+-- | Capital an agent has deployed into a protocol. Signed by operator + agent.
+template DeployedPosition
+  with
+    operator : Party
+    vaultId : Text
+    agent : Party
+    positionId : Text
+    protocol : Text
+    entryValue : Int
+    strategy : StrategyKind
+  where
+    signatory operator, agent
+    key (operator, positionId) : (Party, Text)
+    maintainer key._1
+
+-- | Member proposes a deposit; the operator accepts it. The two-step
+-- request/accept pattern gives the choice body both parties' authority, which
+-- it needs to mint a jointly-signed MemberPosition.
+template DepositRequest
+  with
+    operator : Party
+    member : Party
+    vaultId : Text
+    amount : Int
+  where
+    signatory member
+    observer operator
+
+    choice Accept_Deposit : (ContractId Vault, ContractId MemberPosition)
+      controller operator
+      do
+        assertMsg "amount must be positive" (amount > 0)
+        (vcid, vault) <- fetchByKey @Vault (operator, vaultId)
+        assertMsg "vault is in emergency stop" (not vault.guardrails.emergencyStop)
+
+        let minted = sharesForAssets amount vault.totalShares vault.totalAssets
+        archive vcid
+        newVault <- create vault with
+          totalShares = vault.totalShares + minted
+          totalAssets = vault.totalAssets + amount
+          members = dedup (member :: vault.members)
+
+        -- Merge into the member's existing position if present.
+        optPos <- lookupByKey @MemberPosition (operator, vaultId, member)
+        posCid <- case optPos of
+          Some pcid -> do
+            pos <- fetch pcid
+            archive pcid
+            create MemberPosition with
+              operator, vaultId, member
+              shares = pos.shares + minted
+              costBasis = pos.costBasis + amount
+          None ->
+            create MemberPosition with
+              operator, vaultId, member, shares = minted, costBasis = amount
+        pure (newVault, posCid)
+
+-- | Member proposes a withdrawal of `shares`; operator accepts. Only idle
+-- (non-deployed) liquidity can be withdrawn.
+template WithdrawRequest
+  with
+    operator : Party
+    member : Party
+    vaultId : Text
+    shares : Int
+  where
+    signatory member
+    observer operator
+
+    choice Accept_Withdraw : (ContractId Vault, Optional (ContractId MemberPosition), Int)
+      controller operator
+      do
+        assertMsg "shares must be positive" (shares > 0)
+        (vcid, vault) <- fetchByKey @Vault (operator, vaultId)
+        assertMsg "vault is in emergency stop" (not vault.guardrails.emergencyStop)
+        (pcid, pos) <- fetchByKey @MemberPosition (operator, vaultId, member)
+        assertMsg "insufficient shares" (pos.shares >= shares)
+
+        let assets = assetsForShares shares vault.totalShares vault.totalAssets
+            idle = vault.totalAssets - vault.deployedAssets
+        assertMsg "insufficient idle liquidity; capital is deployed" (assets <= idle)
+
+        archive vcid
+        newVault <- create vault with
+          totalShares = vault.totalShares - shares
+          totalAssets = vault.totalAssets - assets
+        archive pcid
+        optPos <- if pos.shares == shares
+          then pure None
+          else do
+            npos <- create pos with
+              shares = pos.shares - shares
+              costBasis = pos.costBasis - (assets `min` pos.costBasis)
+            pure (Some npos)
+        pure (newVault, optPos, assets)
+
+-- | Agent proposes deploying capital; operator accepts after guardrail checks.
+template DeployRequest
+  with
+    operator : Party
+    agent : Party
+    vaultId : Text
+    positionId : Text
+    protocol : Text
+    amount : Int
+    strategy : StrategyKind
+  where
+    signatory agent
+    observer operator
+
+    choice Accept_Deploy : (ContractId Vault, ContractId DeployedPosition)
+      controller operator
+      do
+        assertMsg "amount must be positive" (amount > 0)
+        -- Agent must hold a right for this vault.
+        _ <- fetchByKey @AgentRight (operator, vaultId, agent)
+        (vcid, vault) <- fetchByKey @Vault (operator, vaultId)
+        assertMsg "vault is in emergency stop" (not vault.guardrails.emergencyStop)
+
+        let whitelisted = null vault.guardrails.whitelistedProtocols
+                            || protocol `elem` vault.guardrails.whitelistedProtocols
+        assertMsg "protocol not whitelisted" whitelisted
+        assertMsg "position exceeds size guardrail"
+          (withinPositionCap amount vault.totalAssets vault.guardrails.maxPositionSizeBps)
+
+        let idle = vault.totalAssets - vault.deployedAssets
+        assertMsg "insufficient idle liquidity" (amount <= idle)
+
+        archive vcid
+        newVault <- create vault with deployedAssets = vault.deployedAssets + amount
+        posCid <- create DeployedPosition with
+          operator, vaultId, agent, positionId, protocol
+          entryValue = amount, strategy
+        pure (newVault, posCid)
+
+-- | Agent proposes closing a position at `returnAmount`; operator accepts.
+-- Rejected if the realized loss breaches the drawdown guardrail.
+template CloseRequest
+  with
+    operator : Party
+    agent : Party
+    vaultId : Text
+    positionId : Text
+    returnAmount : Int
+  where
+    signatory agent
+    observer operator
+
+    choice Accept_Close : ContractId Vault
+      controller operator
+      do
+        assertMsg "return must be non-negative" (returnAmount >= 0)
+        (pcid, pos) <- fetchByKey @DeployedPosition (operator, positionId)
+        (vcid, vault) <- fetchByKey @Vault (operator, vaultId)
+        assertMsg "within drawdown guardrail"
+          (withinDrawdown returnAmount pos.entryValue vault.guardrails.maxDrawdownBps)
+
+        archive pcid
+        archive vcid
+        -- Release entry value from deployment; realized PnL moves the pool
+        -- (shares unchanged, so per-share price moves).
+        create vault with
+          deployedAssets = vault.deployedAssets - pos.entryValue
+          totalAssets = vault.totalAssets - pos.entryValue + returnAmount

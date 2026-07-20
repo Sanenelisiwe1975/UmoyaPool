@@ -1,0 +1,53 @@
+-- | Programmatic proof of the privacy guarantee: after Alice and Bob each
+-- deposit, we query the ledger *as each party*. Daml's `query` only returns
+-- contracts the querying party is a stakeholder of — so Bob's query cannot
+-- return Alice's MemberPosition. This is the "Private DeFi" claim, proven.
+module UmoyaPool.PrivacyDemo where
+
+import Daml.Script
+import UmoyaPool.Types
+import UmoyaPool.Vault
+
+privacyDemo : Script ()
+privacyDemo = do
+  operator <- allocateParty "Operator"
+  alice <- allocateParty "Alice"
+  bob <- allocateParty "Bob"
+
+  let guardrails = Guardrails with
+        maxDrawdownBps = 1000
+        maxPositionSizeBps = 2500
+        whitelistedProtocols = []
+        emergencyStop = False
+
+  _ <- submit operator $ createCmd Vault with
+    operator, vaultId = "core-cc", asset = "CC"
+    totalShares = 0, totalAssets = 0, deployedAssets = 0
+    guardrails, members = []
+
+  aliceDep <- submit alice $ createCmd DepositRequest with
+    operator, member = alice, vaultId = "core-cc", amount = 1000
+  _ <- submit operator $ exerciseCmd aliceDep Accept_Deposit
+
+  bobDep <- submit bob $ createCmd DepositRequest with
+    operator, member = bob, vaultId = "core-cc", amount = 500
+  _ <- submit operator $ exerciseCmd bobDep Accept_Deposit
+
+  -- Query the same ledger as each party.
+  aliceView <- query @MemberPosition alice
+  bobView <- query @MemberPosition bob
+  let aliceMembers = [ p.member | (_, p) <- aliceView ]
+      bobMembers = [ p.member | (_, p) <- bobView ]
+
+  debug "=== PRIVACY PROOF: MemberPosition visibility on one shared ledger ==="
+  debug ("Alice's query returns " <> show (length aliceView) <> " position(s), members: " <> show aliceMembers)
+  debug ("Bob's query returns   " <> show (length bobView) <> " position(s), members: " <> show bobMembers)
+
+  -- The guarantee, asserted.
+  assertMsg "Alice sees exactly her own position" (aliceMembers == [alice])
+  assertMsg "Bob sees exactly his own position" (bobMembers == [bob])
+  assertMsg "Bob CANNOT see Alice's position" (notElem alice bobMembers)
+  assertMsg "Alice CANNOT see Bob's position" (notElem bob aliceMembers)
+
+  debug "PRIVACY VERIFIED: on the same ledger, neither member can see the other's balance."
+  pure ()

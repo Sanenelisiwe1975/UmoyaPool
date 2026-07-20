@@ -1,0 +1,120 @@
+-- | Stokvel — private group savings with M-of-N payout approval.
+--
+-- The privacy angle: members pool funds and vote on payouts, but each member's
+-- contribution is a `MemberStake` private to that member and the operator, and
+-- each `Approval` is an independent, member-signed contract. Other members see
+-- the pool and the proposals, never each other's balances.
+--
+-- Authorization design: a proposer creates a `PayoutProposal` alone; each member
+-- creates their own `Approval` alone; the operator executes via a consuming
+-- choice that tallies approvals and archives them through their own consuming
+-- choices — so no party ever needs another's live authority.
+module UmoyaPool.Stokvel where
+
+import DA.List (dedup)
+
+template Stokvel
+  with
+    operator : Party
+    stokvelId : Text
+    name : Text
+    members : [Party]
+    approvalThreshold : Int   -- ^ M in "M of N"
+    balance : Int
+  where
+    signatory operator
+    observer members
+    key (operator, stokvelId) : (Party, Text)
+    maintainer key._1
+
+-- | A member's private contribution record (operator + member only).
+template MemberStake
+  with
+    operator : Party
+    stokvelId : Text
+    member : Party
+    contributed : Int
+  where
+    signatory operator, member
+    key (operator, stokvelId, member) : (Party, Text, Party)
+    maintainer key._1
+
+-- | Member proposes a contribution; operator accepts, updating the pool and
+-- the member's private stake.
+template ContributionRequest
+  with
+    operator : Party
+    stokvelId : Text
+    member : Party
+    amount : Int
+  where
+    signatory member
+    observer operator
+
+    choice Accept_Contribution : (ContractId Stokvel, ContractId MemberStake)
+      controller operator
+      do
+        assertMsg "amount must be positive" (amount > 0)
+        (scid, s) <- fetchByKey @Stokvel (operator, stokvelId)
+        assertMsg "not a member" (member `elem` s.members)
+        archive scid
+        newS <- create s with balance = s.balance + amount
+        optStake <- lookupByKey @MemberStake (operator, stokvelId, member)
+        stakeCid <- case optStake of
+          Some cid -> do
+            st <- fetch cid
+            archive cid
+            create st with contributed = st.contributed + amount
+          None ->
+            create MemberStake with operator, stokvelId, member, contributed = amount
+        pure (newS, stakeCid)
+
+-- | An independent, member-signed approval of a specific proposal. The operator
+-- can retire it via the consuming `ConsumeApproval` choice during execution.
+template Approval
+  with
+    operator : Party
+    stokvelId : Text
+    proposalId : Text
+    member : Party
+  where
+    signatory member
+    observer operator
+
+    choice ConsumeApproval : ()
+      controller operator
+      do pure ()
+
+-- | A payout proposal. Signed by the proposer alone; operator and members
+-- observe. The operator executes it once enough members have approved.
+template PayoutProposal
+  with
+    operator : Party
+    stokvelId : Text
+    proposalId : Text
+    proposer : Party
+    recipient : Party
+    amount : Int
+    members : [Party]
+  where
+    signatory proposer
+    observer operator :: members
+
+    choice Execute : ContractId Stokvel
+      with approvalCids : [ContractId Approval]
+      controller operator
+      do
+        (scid, s) <- fetchByKey @Stokvel (operator, stokvelId)
+        assertMsg "payout exceeds balance" (amount <= s.balance)
+
+        approvals <- mapA fetch approvalCids
+        let approvers = dedup [ a.member | a <- approvals ]
+        assertMsg "an approval is for another proposal"
+          (all (\a -> a.proposalId == proposalId) approvals)
+        assertMsg "all approvers must be members" (all (`elem` members) approvers)
+        assertMsg "not enough approvals" (length approvers >= s.approvalThreshold)
+
+        -- Retire each approval through its own consuming choice.
+        _ <- mapA (\cid -> exercise cid ConsumeApproval) approvalCids
+        archive scid
+        create s with balance = s.balance - amount
